@@ -34,7 +34,7 @@ generate-deploy-manifests:
 
 ## Install Dynamo platform on the cluster (run before test-e2e)
 DYNAMO_NAMESPACE ?= dynamo-system
-DYNAMO_VERSION ?= 1.0.2
+DYNAMO_VERSION ?= 1.1.1
 DYNAMO_CHART_URL := https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$(DYNAMO_VERSION).tgz
 DYNAMO_PRE_DEPLOY_URL := https://raw.githubusercontent.com/ai-dynamo/dynamo/v$(DYNAMO_VERSION)/deploy/pre-deployment/pre-deployment-check.sh
 
@@ -54,7 +54,7 @@ setup-dynamo:
 
 ## Uninstall Dynamo platform from the cluster
 cleanup-dynamo:
-	helm uninstall dynamo-platform --namespace $(DYNAMO_NAMESPACE) --ignore-not-found
+	@helm uninstall dynamo-platform --namespace $(DYNAMO_NAMESPACE) --ignore-not-found
 	@echo "✅ Dynamo platform uninstalled from namespace $(DYNAMO_NAMESPACE)"
 
 ## Run e2e tests (requires DYNAMO_INSTALLED=true and a cluster with dynamo provider deployed)

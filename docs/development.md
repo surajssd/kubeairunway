@@ -11,6 +11,7 @@
 ## Quick Start
 
 ### Web UI Development
+
 ```bash
 # Install dependencies
 bun install
@@ -27,6 +28,7 @@ bun run dev
 ```
 
 ### Controller Development
+
 ```bash
 # Build the controller binary
 make controller-build
@@ -56,6 +58,7 @@ make controller-deploy CONTROLLER_IMG=<YOUR IMAGE>
 ```
 
 **Important**: After editing `controller/api/v1alpha1/*_types.go` files, always run:
+
 ```bash
 cd controller && make manifests generate
 ```
@@ -76,6 +79,7 @@ curl http://localhost:3001/api/health/version
 ```
 
 The compile process:
+
 1. Builds the frontend with Vite
 2. Generates native Bun file imports in `backend/src/embedded-assets.ts`
 3. Injects build-time constants (version, git commit, build time) via `--define`
@@ -101,6 +105,7 @@ VERSION=v1.0.0 bun run compile
 ```
 
 Supported targets:
+
 - `linux-x64`, `linux-arm64`
 - `darwin-x64`, `darwin-arm64`
 - `windows-x64`
@@ -110,6 +115,7 @@ Supported targets:
 The controller is a Go-based Kubernetes operator built with [Kubebuilder](https://kubebuilder.io/).
 
 ### Project Structure
+
 ```
 controller/
 ├── api/v1alpha1/           # CRD type definitions
@@ -127,12 +133,14 @@ controller/
 ```
 
 ### CRDs
+
 AI Runway defines two CRDs:
 
 1. **ModelDeployment** (namespaced) - User-facing API for deploying models
 2. **InferenceProviderConfig** (cluster-scoped) - Provider registration
 
 After editing `*_types.go` files, regenerate code:
+
 ```bash
 cd controller && make manifests generate
 ```
@@ -150,16 +158,17 @@ The core controller reconciliation follows these steps:
 
 The core controller stops here. Provider controllers then:
 
-6. **Filter** — only reconcile ModelDeployments where `status.provider.name` matches
-7. **Validate compatibility** — check engine/mode support for this provider
-8. **Transform** — convert ModelDeployment spec to provider-specific resource
-9. **Create/Update** — apply provider resource with owner references
-10. **Sync status** — map provider resource status back to ModelDeployment (phase, replicas, endpoint)
-11. **Handle deletion** — clean up provider resources via finalizers (5-minute timeout)
+1. **Filter** — only reconcile ModelDeployments where `status.provider.name` matches
+2. **Validate compatibility** — check engine/mode support for this provider
+3. **Transform** — convert ModelDeployment spec to provider-specific resource
+4. **Create/Update** — apply provider resource with owner references
+5. **Sync status** — map provider resource status back to ModelDeployment (phase, replicas, endpoint)
+6. **Handle deletion** — clean up provider resources via finalizers (5-minute timeout)
 
 ### Observability
 
 **Controller metrics:**
+
 ```
 airunway_modeldeployment_total{namespace, phase}
 airunway_reconciliation_duration_seconds{provider}
@@ -170,6 +179,7 @@ airunway_deployment_phase{name, namespace, phase}
 ```
 
 **Events emitted:**
+
 ```
 Normal   ProviderSelected    Selected provider 'dynamo': default → dynamo (GPU inference default)
 Normal   ResourceCreated     Created DynamoGraphDeployment 'my-llm'
@@ -180,6 +190,7 @@ Warning  FinalizerTimeout    Finalizer removed after timeout, provider resource 
 ```
 
 ### Running Locally
+
 ```bash
 # Install CRDs first
 make controller-install
@@ -189,6 +200,7 @@ make controller-run
 ```
 
 ### Testing
+
 ```bash
 # Run unit tests
 make controller-test
@@ -224,6 +236,7 @@ The controller uses finalizers to ensure provider resource cleanup on deletion:
 3. Orphaned provider resources may remain (logged for manual cleanup)
 
 **Manual escape (immediate — use when deletion is stuck):**
+
 ```bash
 kubectl patch modeldeployment my-llm --type=merge \
   -p '{"metadata":{"finalizers":[]}}'
@@ -260,6 +273,7 @@ cd providers/kaito && make generate-deploy-manifests
 ## Environment Variables
 
 ### Frontend (.env)
+
 ```env
 VITE_API_URL=http://localhost:3001
 VITE_DEFAULT_NAMESPACE=airunway-system
@@ -267,6 +281,7 @@ VITE_DEFAULT_HF_SECRET=hf-token-secret
 ```
 
 ### Backend (.env)
+
 ```env
 PORT=3001
 DEFAULT_NAMESPACE=airunway-system
@@ -289,17 +304,21 @@ AUTH_ENABLED=true ./dist/airunway
 ### Login Flow
 
 1. **Run the login command:**
+
    ```bash
    airunway login
    ```
+
    This extracts your OIDC token from kubeconfig and opens the browser with a magic link.
 
 2. **Alternative: Specify server URL:**
+
    ```bash
    airunway login --server https://airunway.example.com
    ```
 
 3. **Use a specific kubeconfig context:**
+
    ```bash
    airunway login --context my-cluster
    ```
@@ -315,6 +334,7 @@ AUTH_ENABLED=true ./dist/airunway
 ### Public Routes (No Auth Required)
 
 These routes are accessible without authentication:
+
 - `GET /api/health` - Health check
 - `GET /api/cluster/status` - Cluster connection status
 - `GET /api/settings` - Settings (includes `auth.enabled` for frontend)
@@ -335,6 +355,7 @@ airunway help               # Show help
 ## Project Commands
 
 ### Root
+
 ```bash
 bun run dev           # Start both frontend and backend
 bun run build         # Build all packages
@@ -343,6 +364,7 @@ bun run lint          # Lint all packages
 ```
 
 ### Controller (Go)
+
 ```bash
 make controller-build       # Build Go controller binary
 make controller-test        # Run controller tests
@@ -353,12 +375,14 @@ make controller-deploy      # Deploy controller to cluster
 ```
 
 ### Frontend
+
 ```bash
 bun run dev:frontend    # Start Vite dev server
 bun run build:frontend  # Build for production
 ```
 
 ### Backend
+
 ```bash
 bun run dev:backend     # Start with watch mode
 bun run build:backend   # Compile TypeScript
@@ -379,6 +403,7 @@ bun test --coverage                # With coverage report
 ```
 
 **Test organization:**
+
 - `src/routes/*.test.ts` — Route-level tests using Hono's `app.request()` (exercises full middleware stack)
 - `src/services/*.test.ts` — Service unit tests with mocked dependencies
 - `src/lib/*.test.ts` — Utility/library unit tests
@@ -420,6 +445,7 @@ make clean              # Remove build artifacts
 #### Configuring Backend URL
 
 The plugin discovers the backend in this order:
+
 1. **Plugin Settings**: Configure in Headlamp → Settings → Plugins → AIRunway
 2. **In-Cluster**: Auto-discovers `airunway.<namespace>.svc`
 3. **Default**: Falls back to `http://localhost:3001`
@@ -427,12 +453,14 @@ The plugin discovers the backend in this order:
 #### Testing with Headlamp Desktop
 
 1. Build and deploy the plugin:
+
    ```bash
    cd plugins/headlamp
    make setup
    ```
 
 2. Start AI Runway backend:
+
    ```bash
    cd ../..
    bun run dev:backend
@@ -443,6 +471,7 @@ The plugin discovers the backend in this order:
 ## Kubernetes Setup
 
 ### Create HuggingFace Token Secret
+
 ```bash
 kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="your-token" \
@@ -450,9 +479,10 @@ kubectl create secret generic hf-token-secret \
 ```
 
 ### Install NVIDIA Dynamo (via Helm)
+
 ```bash
 export NAMESPACE=dynamo-system
-export RELEASE_VERSION=1.0.2
+export RELEASE_VERSION=1.1.1
 
 # The Dynamo platform chart bundles its CRDs
 helm upgrade --install dynamo-platform \
@@ -478,6 +508,7 @@ ModelDeployment → Provider Controller → Upstream CRD → Upstream Operator �
 ```
 
 1. **Create provider directory:**
+
    ```
    providers/<name>/
    ├── cmd/main.go          # Provider entrypoint
@@ -509,11 +540,13 @@ ModelDeployment → Provider Controller → Deployments/Services → Pods
 This works because the `status.provider.resourceKind` and `resourceName` fields are free-form strings — they can point at a `Deployment` just as easily as a `Workspace`. The core controller never inspects what the provider creates.
 
 **When to use this pattern:**
+
 - Building a new inference runtime with no pre-existing CRD
 - A lightweight provider that runs vLLM/SGLang containers directly via Deployments
 - A "generic" provider where an upstream CRD adds no value
 
 **Directory structure** (no `transformer.go` needed):
+
 ```
 providers/<name>/
 ├── cmd/main.go          # Provider entrypoint
@@ -527,6 +560,7 @@ providers/<name>/
 ```
 
 **Example reconciliation** (simplified):
+
 ```go
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
     md := &v1alpha1.ModelDeployment{}
@@ -555,7 +589,8 @@ The `config.go` for a native provider can omit the `airunway.ai/installation` an
 
 ### Common Steps (Both Patterns)
 
-3. **Add Makefile targets** in the root `Makefile`:
+1. **Add Makefile targets** in the root `Makefile`:
+
    ```bash
    make <name>-provider-build         # Build provider binary
    make <name>-provider-docker-build  # Build Docker image
@@ -689,21 +724,25 @@ curl http://localhost:5000/v1/chat/completions \
 ## Troubleshooting
 
 ### Controller not reconciling
+
 - Check controller logs: `kubectl logs -n airunway-system deploy/airunway-controller-manager`
 - Verify CRDs are installed: `kubectl get crd modeldeployments.airunway.ai`
 - Check RBAC permissions for the controller service account
 
 ### ModelDeployment stuck in Pending
+
 - Check if any `InferenceProviderConfig` resources exist: `kubectl get inferenceproviderconfigs`
 - Verify at least one provider has `status.ready: true`
 - Check controller logs for provider selection errors
 
 ### Backend can't connect to cluster
+
 - Verify kubectl is configured: `kubectl cluster-info`
 - Check KUBECONFIG environment variable
 - Ensure proper RBAC permissions
 
 ### Provider not detected as installed
+
 - Check CRD exists:
   - Dynamo: `kubectl get crd dynamographdeployments.nvidia.com`
   - KubeRay: `kubectl get crd rayservices.ray.io`
@@ -714,17 +753,20 @@ curl http://localhost:5000/v1/chat/completions \
   - KAITO: `kubectl get deployments -n kaito-workspace`
 
 ### KAITO deployment stuck in Pending
+
 - Check KAITO workspace status: `kubectl describe workspace <name> -n kaito-workspace`
 - Verify node labels match labelSelector (default: `kubernetes.io/os: linux`)
 - For vLLM mode, ensure GPU nodes are available
 - Check events: `kubectl get events -n kaito-workspace --sort-by=.lastTimestamp`
 
 ### Metrics not available
+
 - Metrics require AI Runway to run in-cluster
 - Check deployment pods are running: `kubectl get pods -n <namespace>`
 - Verify metrics endpoint is exposed (port 8000 for vLLM, port 5000 for llama.cpp)
 
 ### Frontend can't reach backend
+
 - Check CORS_ORIGIN matches frontend URL
 - Verify backend is running on correct port
 - Check browser console for errors
@@ -732,6 +774,7 @@ curl http://localhost:5000/v1/chat/completions \
 ### Headlamp Plugin Issues
 
 #### Plugin not appearing in Headlamp
+
 - Verify plugin was built: `cd plugins/headlamp && bun run build`
 - Check plugin deployment location:
   - macOS: `~/.config/Headlamp/plugins/airunway-headlamp-plugin`
@@ -740,17 +783,20 @@ curl http://localhost:5000/v1/chat/completions \
 - Restart Headlamp after deploying the plugin
 
 #### Plugin can't connect to backend
+
 - Check backend URL in Headlamp → Settings → Plugins → AIRunway
 - Verify backend is running: `curl http://localhost:3001/api/health`
 - For in-cluster deployments, ensure the service is accessible
 - Check browser dev tools (Network tab) for connection errors
 
 #### Plugin shows "Connection Failed" banner
+
 - The plugin auto-discovers the backend; ensure it's running
 - In-cluster: Deploy AI Runway backend to `airunway-system` namespace
 - Local development: Start backend with `bun run dev:backend`
 
 #### Type errors after shared package changes
+
 - Rebuild the shared package: `cd shared && bun run build`
 - Rebuild the plugin: `cd plugins/headlamp && bun run build`
 - Clear TypeScript cache: `rm -rf plugins/headlamp/node_modules/.cache`
