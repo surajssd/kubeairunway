@@ -37,6 +37,8 @@ DYNAMO_NAMESPACE ?= dynamo-system
 DYNAMO_VERSION ?= 1.1.1
 DYNAMO_CHART_URL := https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$(DYNAMO_VERSION).tgz
 DYNAMO_PRE_DEPLOY_URL := https://raw.githubusercontent.com/ai-dynamo/dynamo/v$(DYNAMO_VERSION)/deploy/pre-deployment/pre-deployment-check.sh
+GAIE_VERSION := v1.5.0
+GAIE_MANIFEST_URL := https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$(GAIE_VERSION)/manifests.yaml
 
 setup-dynamo:
 	@echo "Running Dynamo pre-deployment checks..."
@@ -45,6 +47,8 @@ setup-dynamo:
 		curl -fsSL "$(DYNAMO_PRE_DEPLOY_URL)" -o "$$TMPSCRIPT" && \
 		chmod +x "$$TMPSCRIPT" && \
 		bash "$$TMPSCRIPT"
+	@echo "Pre-deployment checks passed. Installing GAIE components..."
+	@kubectl apply -f $(GAIE_MANIFEST_URL)
 	@echo "Installing Dynamo platform v$(DYNAMO_VERSION)..."
 	@helm upgrade -i dynamo-platform "$(DYNAMO_CHART_URL)" \
 			--namespace $(DYNAMO_NAMESPACE) \
@@ -54,6 +58,10 @@ setup-dynamo:
 
 ## Uninstall Dynamo platform from the cluster
 cleanup-dynamo:
+	@echo "⚠️ Skipping GAIE components uninstall as they may be shared. Please uninstall them manually if needed by running:"
+	@echo
+	@echo "kubectl delete -f \"$(GAIE_MANIFEST_URL)\" --ignore-not-found"
+	@echo
 	@helm uninstall dynamo-platform --namespace $(DYNAMO_NAMESPACE) --ignore-not-found
 	@echo "✅ Dynamo platform uninstalled from namespace $(DYNAMO_NAMESPACE)"
 
