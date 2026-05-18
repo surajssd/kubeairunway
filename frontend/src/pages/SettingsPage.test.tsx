@@ -741,7 +741,10 @@ describe('SettingsPage', () => {
       message: 'Gateway API and Inference Extension CRDs are installed. No active gateway detected.',
       pinnedVersion: PINNED_GAIE_VERSION,
       gatewayApiVersion: undefined,
-      inferenceExtVersion: 'v1.5.0',
+      // Intentionally a known-old value distinct from PINNED_GAIE_VERSION so
+      // this test continues to exercise the "installed differs from pinned"
+      // path after future version bumps.
+      inferenceExtVersion: 'v1.4.0',
     }
 
     render(
@@ -751,8 +754,8 @@ describe('SettingsPage', () => {
     )
 
     const inferenceExtensionLabel = screen.getByText('Inference Extension').closest('div')
-    expect(inferenceExtensionLabel).toHaveTextContent('(v1.5.0)')
-    expect(inferenceExtensionLabel).not.toHaveTextContent('v1.3.1')
+    expect(inferenceExtensionLabel).toHaveTextContent('(v1.4.0)')
+    expect(inferenceExtensionLabel).not.toHaveTextContent(`(${PINNED_GAIE_VERSION})`)
   })
 
   it('uses the Hugging Face emoji on the connect button', () => {
