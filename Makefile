@@ -132,7 +132,7 @@ clean:
 
 # Build the controller binary
 controller-build: verify-versions
-	cd controller && $(MAKE) build
+	cd controller && $(MAKE) VERIFIED_VERSIONS=1 build
 	@echo "✅ Controller binary built: controller/bin/manager"
 
 # Build controller Docker image

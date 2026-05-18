@@ -116,7 +116,9 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 
 .PHONY: verify-versions
 verify-versions: ## Verify upstream versions are in sync (delegates to root Makefile).
+ifneq ($(VERIFIED_VERSIONS),1)
 	@$(MAKE) -C .. verify-versions
+endif
 
 .PHONY: build
 build: verify-versions manifests generate fmt vet ## Build manager binary.

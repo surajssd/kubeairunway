@@ -18,7 +18,9 @@ LDFLAGS := -X github.com/kaito-project/airunway/providers/dynamo.DynamoVersion=$
 
 ## Verify upstream versions are in sync (delegates to root Makefile).
 verify-versions:
+ifneq ($(VERIFIED_VERSIONS),1)
 	@$(MAKE) -C ../.. verify-versions
+endif
 
 ## Build the provider binary
 build: verify-versions
