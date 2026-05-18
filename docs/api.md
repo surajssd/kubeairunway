@@ -353,6 +353,59 @@ Check if Helm CLI is available.
 }
 ```
 
+### GET /installation/gateway/status
+
+Check whether the Gateway API and Gateway API Inference Extension (GAIE) CRDs are installed in the cluster, and report the pinned GAIE version the controller expects.
+
+**Response:**
+
+```json
+{
+  "gatewayApiInstalled": true,
+  "inferenceExtInstalled": true,
+  "gatewayApiVersion": "v1.2.1",
+  "inferenceExtVersion": "v0.5.0",
+  "pinnedVersion": "v0.5.0",
+  "gatewayAvailable": true,
+  "gatewayEndpoint": "10.0.0.50",
+  "message": "Gateway API and Inference Extension CRDs are installed. Gateway is available.",
+  "installCommands": [
+    "kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml",
+    "kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/v0.5.0/manifests.yaml"
+  ]
+}
+```
+
+**Notes:**
+
+- `pinnedVersion` is the GAIE version the controller is built against (`PINNED_GAIE_VERSION` from `@airunway/shared`, sourced from `versions.env`).
+- `installCommands` are the manual fallback commands; prefer the `POST` endpoint below when Helm/kubectl is available server-side.
+
+### POST /installation/gateway/install-crds
+
+Install (or re-apply) the Gateway API CRDs and the pinned Gateway API Inference Extension CRDs. This is a **prerequisite for every provider install** and only needs to be run once per cluster.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "message": "Gateway API and Inference Extension CRDs installed successfully",
+  "results": [
+    {
+      "step": "gateway-api-crds",
+      "success": true,
+      "output": "customresourcedefinition.apiextensions.k8s.io/gateways.gateway.networking.k8s.io created"
+    },
+    {
+      "step": "inference-extension-crds",
+      "success": true,
+      "output": "customresourcedefinition.apiextensions.k8s.io/inferencepools.inference.networking.x-k8s.io created"
+    }
+  ]
+}
+```
+
 ### GET /installation/providers/:id/status
 
 Get provider installation status.
@@ -374,6 +427,14 @@ Get provider installation status.
 ### GET /installation/providers/:id/commands
 
 Get manual installation commands for a provider.
+
+> **Prerequisite — install the Gateway API Inference Extension (GAIE) CRDs first.**
+> The commands returned here only cover the provider's own Helm install. GAIE is a shared dependency required by every provider and is installed through a separate flow:
+>
+> 1. Check status with [`GET /installation/gateway/status`](#get-installationgatewaystatus).
+> 2. If `inferenceExtInstalled` is `false`, install via [`POST /installation/gateway/install-crds`](#post-installationgatewayinstall-crds) (or run the `kubectl apply` lines returned in `installCommands`).
+>
+> Only then run the commands from this endpoint.
 
 **Response:**
 
