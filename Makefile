@@ -221,7 +221,12 @@ verify-versions:
 	@# 3. controller/internal/gateway/detection.go fallback literal must match GAIE_VERSION
 	@grep -qE '^var DefaultGAIEVersion = "$(GAIE_VERSION_RE)"$$' controller/internal/gateway/detection.go || \
 	  { echo "❌ controller/internal/gateway/detection.go DefaultGAIEVersion fallback != $(GAIE_VERSION) (from versions.env)"; exit 1; }
-	@# 4. generated TS must be up to date with versions.env
+	@# 4. generated TS must be up to date with versions.env.
+	@#    NOTE: this regenerates shared/types/versions.generated.ts in-place
+	@#    and then diffs against HEAD. The target intentionally mutates the
+	@#    working tree; on CI this is a no-op, locally it overwrites any
+	@#    uncommitted edits to the generated file (which is the desired
+	@#    behavior — the file is generated, not hand-edited).
 	@cd shared && if command -v bun >/dev/null 2>&1; then \
 	  bun run generate-versions >/dev/null; \
 	elif command -v node >/dev/null 2>&1; then \
