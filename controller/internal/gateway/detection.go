@@ -16,10 +16,6 @@ const (
 	// Positive results are cached permanently since CRDs don't disappear.
 	negativeCacheTTL = 60 * time.Second
 
-	// DefaultGAIEVersion is the default Gateway API Inference Extension version.
-	// Can be overridden at build time via ldflags or at runtime via --epp-image flag.
-	DefaultGAIEVersion = "v1.3.1"
-
 	// InferencePoolCRDGroup is the API group for InferencePool
 	InferencePoolCRDGroup = "inference.networking.k8s.io"
 	// InferencePoolCRDVersion is the API version for InferencePool
@@ -45,6 +41,18 @@ const (
 	// assumes the BBR is in the same namespace as the Gateway.
 	AnnotationBBRNamespace = "airunway.ai/bbr-namespace"
 )
+
+// DefaultGAIEVersion is the default Gateway API Inference Extension version.
+//
+// Single source of truth: /versions.env at the repo root. The build-time value
+// is injected via:
+//
+//	-ldflags "-X github.com/kaito-project/airunway/controller/internal/gateway.DefaultGAIEVersion=$(GAIE_VERSION)"
+//
+// (see controller/Makefile). The string literal below is a fallback for
+// `go run` / `go test` invocations that bypass the Makefile, and can also be
+// overridden at runtime via the --epp-image flag.
+var DefaultGAIEVersion = "v1.5.0"
 
 // GatewayConfig holds the resolved gateway configuration
 type GatewayConfig struct {

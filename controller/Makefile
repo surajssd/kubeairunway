@@ -1,6 +1,16 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
 
+# Upstream component versions (single source of truth at /versions.env).
+# Each KEY=VALUE becomes a Make variable; we re-export so go/ldflags can read them.
+include ../versions.env
+export
+
+# Inject build-time defaults into the controller binary so the values track
+# /versions.env automatically. The Go fallback literals in the source files
+# only apply when bypassing the Makefile (e.g. `go run`, `go test`).
+LDFLAGS := -X github.com/kaito-project/airunway/controller/internal/gateway.DefaultGAIEVersion=$(GAIE_VERSION)
+
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
 GOBIN=$(shell go env GOPATH)/bin
@@ -58,7 +68,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet setup-envtest ## Run tests.
+test: verify-versions manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
@@ -104,13 +114,17 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 
 ##@ Build
 
+.PHONY: verify-versions
+verify-versions: ## Verify upstream versions are in sync (delegates to root Makefile).
+	@$(MAKE) -C .. verify-versions
+
 .PHONY: build
-build: manifests generate fmt vet ## Build manager binary.
-	go build -o bin/manager cmd/main.go
+build: verify-versions manifests generate fmt vet ## Build manager binary.
+	go build -ldflags="$(LDFLAGS)" -o bin/manager cmd/main.go
 
 .PHONY: run
-run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/main.go
+run: verify-versions manifests generate fmt vet ## Run a controller from your host.
+	go run -ldflags="$(LDFLAGS)" ./cmd/main.go
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.

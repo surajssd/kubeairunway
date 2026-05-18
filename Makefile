@@ -1,4 +1,4 @@
-.PHONY: install dev dev-frontend dev-backend build compile lint test clean help providers-test
+.PHONY: install dev dev-frontend dev-backend build compile lint test clean help providers-test verify-versions
 .PHONY: controller-build controller-docker-build controller-install controller-deploy controller-generate generate-deploy-manifests
 .PHONY: model-downloader-docker-build
 
@@ -17,8 +17,10 @@ PUSH ?= false
 PUSH_ENABLED := $(filter true TRUE 1 yes YES on ON,$(PUSH))
 IMAGE_OUTPUT_FLAG := $(if $(PUSH_ENABLED),--push,--load)
 
-# Gateway API Inference Extension version
-GAIE_VERSION ?= v1.3.1
+# Upstream component versions. Single source of truth at the repo root.
+# Edit versions.env to bump GAIE_VERSION, DYNAMO_VERSION, etc.
+include versions.env
+export
 
 # Default target
 help:
@@ -78,11 +80,11 @@ dev-backend:
 	bun run dev:backend
 
 # Build
-build:
+build: verify-versions
 	bun run build
 
 # Compile single binary (includes frontend)
-compile:
+compile: verify-versions
 	bun run compile
 	@echo ""
 	@echo "✅ Binary created: dist/airunway (includes frontend)"
@@ -94,19 +96,19 @@ compile-all: compile-linux compile-darwin compile-windows
 	@echo "✅ All binaries created in dist/"
 	@ls -lh dist/
 
-compile-linux:
+compile-linux: verify-versions
 	bun run build:frontend
 	cd backend && bun run compile:linux-x64
 	cd backend && bun run compile:linux-arm64
 	@echo "✅ Linux binaries created"
 
-compile-darwin:
+compile-darwin: verify-versions
 	bun run build:frontend
 	cd backend && bun run compile:darwin-x64
 	cd backend && bun run compile:darwin-arm64
 	@echo "✅ macOS binaries created"
 
-compile-windows:
+compile-windows: verify-versions
 	bun run build:frontend
 	cd backend && bun run compile:windows-x64
 	@echo "✅ Windows binary created"
@@ -116,7 +118,7 @@ lint:
 	bun run lint
 
 # Testing
-test:
+test: verify-versions
 	bun run test
 
 # Clean build artifacts
@@ -129,12 +131,12 @@ clean:
 # ==================== Controller Targets ====================
 
 # Build the controller binary
-controller-build:
+controller-build: verify-versions
 	cd controller && go build -o bin/manager ./cmd/main.go
 	@echo "✅ Controller binary built: controller/bin/manager"
 
 # Build controller Docker image
-controller-docker-build:
+controller-docker-build: verify-versions
 	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) -f controller/Dockerfile -t $(CONTROLLER_IMG) .
 	@echo "✅ Controller image built: $(CONTROLLER_IMG) ($(PLATFORM), $(if $(PUSH_ENABLED),pushed,loaded locally))"
 
@@ -168,12 +170,12 @@ controller-run:
 	cd controller && go run ./cmd/main.go --enable-provider-selector=true
 
 # Run controller tests
-controller-test:
+controller-test: verify-versions
 	cd controller && go test ./... -coverprofile cover.out
 	@echo "✅ Controller tests completed"
 
 # Run provider tests
-providers-test:
+providers-test: verify-versions
 	cd providers/dynamo && go test ./...
 	cd providers/kaito && go test ./...
 	cd providers/kuberay && go test ./...
@@ -197,3 +199,18 @@ generate-deploy-manifests:
 model-downloader-docker-build:
 	docker buildx build --platform $(PLATFORM) $(IMAGE_OUTPUT_FLAG) -f images/model-downloader/Dockerfile -t $(MODEL_DOWNLOADER_IMG) images/model-downloader
 	@echo "✅ Model downloader image built: $(MODEL_DOWNLOADER_IMG) ($(PLATFORM), $(if $(PUSH_ENABLED),pushed,loaded locally))"
+
+# ==================== Version Drift Guard ====================
+
+# Verify all version references are in sync with versions.env.
+# Wired as a prerequisite of every build/test target so drift is caught
+# the moment it is introduced.
+verify-versions:
+	@# 1. controller/go.mod must pin GAIE_VERSION
+	@grep -q "gateway-api-inference-extension $(GAIE_VERSION)" controller/go.mod || \
+	  { echo "❌ controller/go.mod GAIE version != $(GAIE_VERSION) (from versions.env)"; exit 1; }
+	@# 2. generated TS must be up to date with versions.env
+	@cd shared && (command -v bun >/dev/null 2>&1 && bun run generate-versions || node --experimental-strip-types scripts/generate-versions.ts) >/dev/null
+	@git diff --exit-code shared/types/versions.generated.ts >/dev/null || \
+	  { echo "❌ shared/types/versions.generated.ts is stale — commit the regenerated file"; exit 1; }
+	@echo "✅ versions in sync (GAIE_VERSION=$(GAIE_VERSION), DYNAMO_VERSION=$(DYNAMO_VERSION))"

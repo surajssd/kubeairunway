@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { PINNED_GAIE_VERSION } from '@airunway/shared'
 import { SettingsPage } from './SettingsPage'
 
 const mutateAsync = vi.fn()
@@ -34,7 +35,7 @@ let mockGatewayStatus = {
   gatewayAvailable: false,
   installCommands: [] as string[],
   message: '',
-  pinnedVersion: 'v1.3.1',
+  pinnedVersion: PINNED_GAIE_VERSION,
   gatewayApiVersion: undefined as string | undefined,
   inferenceExtVersion: undefined as string | undefined,
 }
@@ -328,7 +329,7 @@ describe('SettingsPage', () => {
       gatewayAvailable: false,
       installCommands: [],
       message: '',
-      pinnedVersion: 'v1.3.1',
+      pinnedVersion: PINNED_GAIE_VERSION,
       gatewayApiVersion: undefined,
       inferenceExtVersion: undefined,
     }
@@ -738,7 +739,7 @@ describe('SettingsPage', () => {
       gatewayAvailable: false,
       installCommands: [],
       message: 'Gateway API and Inference Extension CRDs are installed. No active gateway detected.',
-      pinnedVersion: 'v1.3.1',
+      pinnedVersion: PINNED_GAIE_VERSION,
       gatewayApiVersion: undefined,
       inferenceExtVersion: 'v1.5.0',
     }
