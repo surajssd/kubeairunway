@@ -14,4 +14,20 @@ export default [
   // core rules (e.g. `no-undef`) that TypeScript already enforces, so we don't
   // need the `globals` package for Node/Bun globals like `process` or `Bun`.
   ...tseslint.configs['flat/recommended'],
+
+  {
+    files: ['**/*.ts'],
+    rules: {
+      // Allow intentionally-unused identifiers when prefixed with `_`
+      // (e.g. unused function params kept for signature/positional reasons).
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+        },
+      ],
+    },
+  },
 ]

@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, test, expect, afterEach } from 'bun:test';
 import app, { parseCorsOrigin } from './hono-app';
 import { kubernetesService } from './services/kubernetes';
 import { configService } from './services/config';

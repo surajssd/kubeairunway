@@ -29,6 +29,16 @@ export default [
       'react-refresh': reactRefresh,
     },
     rules: {
+      // Allow intentionally-unused identifiers when prefixed with `_`
+      // (e.g. unused function params kept for signature/positional reasons).
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+        },
+      ],
       // The two battle-tested Hooks rules. (react-hooks v7 also ships
       // experimental react-compiler rules; we intentionally opt into only the
       // stable pair so the existing code base lints cleanly.)
