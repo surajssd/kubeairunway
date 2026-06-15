@@ -384,15 +384,25 @@ func (t *Transformer) buildVLLMArgs(md *airunwayv1alpha1.ModelDeployment, kvTran
 	}
 
 	// A flag we derive from structured spec fields (e.g. --tensor-parallel-size
-	// from the GPU count) must yield to an explicit spec.engine.args entry of the
-	// same key. Recipes fold tensor parallelism into BOTH resources.gpu and
-	// engine.args; the GPU count is user-editable after a recipe is applied, so
-	// emitting our derived flag unconditionally would produce a conflicting
-	// duplicate (e.g. "--tensor-parallel-size 2 … --tensor-parallel-size 4") and
-	// crash vLLM. When the user supplies the key explicitly, that value wins and
-	// we skip our derived form.
+	// from the GPU count) must yield to an explicit override of the same key,
+	// whether it is provided via spec.engine.args (map) or spec.engine.extraArgs
+	// (raw "--key"/"--key=value" tokens). Recipes fold tensor parallelism into
+	// BOTH resources.gpu and engine args; the GPU count is user-editable after a
+	// recipe is applied, so emitting our derived flag unconditionally would
+	// produce a conflicting duplicate (e.g. "--tensor-parallel-size 2 …
+	// --tensor-parallel-size 4") and crash vLLM. When the user supplies the key
+	// explicitly, that value wins and we skip our derived form.
+	explicitKeys := map[string]struct{}{}
+	for key := range md.Spec.Engine.Args {
+		explicitKeys[key] = struct{}{}
+	}
+	for _, arg := range md.Spec.Engine.ExtraArgs {
+		if key, ok := extraArgKey(arg); ok {
+			explicitKeys[key] = struct{}{}
+		}
+	}
 	hasExplicitArg := func(key string) bool {
-		_, ok := md.Spec.Engine.Args[key]
+		_, ok := explicitKeys[key]
 		return ok
 	}
 
@@ -671,8 +681,16 @@ func (t *Transformer) buildResourceLimits(spec *airunwayv1alpha1.ResourceSpec) m
 func (t *Transformer) buildEnvVars(md *airunwayv1alpha1.ModelDeployment) []interface{} {
 	var envVars []interface{}
 
+	// When a HuggingFace token secret is configured we inject HF_TOKEN from it
+	// below; drop any user-supplied HF_TOKEN so the pod does not carry two
+	// same-named env entries (Kubernetes silently keeps the last one).
+	injectHFToken := md.Spec.Secrets != nil && md.Spec.Secrets.HuggingFaceToken != ""
+
 	// Add user-specified env vars
 	for _, e := range md.Spec.Env {
+		if injectHFToken && e.Name == "HF_TOKEN" {
+			continue
+		}
 		ev := map[string]interface{}{
 			"name": e.Name,
 		}
@@ -688,7 +706,7 @@ func (t *Transformer) buildEnvVars(md *airunwayv1alpha1.ModelDeployment) []inter
 	}
 
 	// Add HF_TOKEN from secret if specified
-	if md.Spec.Secrets != nil && md.Spec.Secrets.HuggingFaceToken != "" {
+	if injectHFToken {
 		envVars = append(envVars, map[string]interface{}{
 			"name": "HF_TOKEN",
 			"valueFrom": map[string]interface{}{

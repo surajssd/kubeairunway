@@ -397,6 +397,45 @@ func TestTransformAggregatedHFTokenSecret(t *testing.T) {
 	}
 }
 
+// A user-supplied HF_TOKEN in spec.env must not coexist with the secret-backed
+// injection: the pod should carry exactly one HF_TOKEN, sourced from the secret.
+func TestTransformHFTokenSecretDedupesUserEnv(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Secrets = &airunwayv1alpha1.SecretsSpec{HuggingFaceToken: "my-hf-secret"}
+	md.Spec.Env = []corev1.EnvVar{
+		{Name: "HF_TOKEN", Value: "plaintext-should-be-dropped"},
+		{Name: "VLLM_USE_V1", Value: "1"},
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	container := getContainer(t, resources[0])
+	envVars, _ := container["env"].([]interface{})
+
+	hfCount := 0
+	for _, ev := range envVars {
+		e := ev.(map[string]interface{})
+		if e["name"] != "HF_TOKEN" {
+			continue
+		}
+		hfCount++
+		// The surviving entry must be the secret-backed one, not the plaintext value.
+		if _, hasValueFrom := e["valueFrom"]; !hasValueFrom {
+			t.Errorf("expected secret-backed HF_TOKEN, got plaintext entry %v", e)
+		}
+		if _, hasValue := e["value"]; hasValue {
+			t.Errorf("expected no inline value on HF_TOKEN, got %v", e["value"])
+		}
+	}
+	if hfCount != 1 {
+		t.Fatalf("expected exactly one HF_TOKEN env var, got %d in %v", hfCount, envVars)
+	}
+}
+
 func TestTransformAggregatedEnvVars(t *testing.T) {
 	tr := NewTransformer()
 	md := newTestMD("test-model", "default")
@@ -1169,6 +1208,46 @@ func TestBuildVLLMArgsTensorParallelDedup(t *testing.T) {
 	}
 	if value, _ := argValue(args, "--tensor-parallel-size"); value != "4" {
 		t.Errorf("expected explicit engine.args value 4 to win, got %q", value)
+	}
+}
+
+// A derived flag supplied via spec.engine.extraArgs (raw "--key=value" or
+// "--key value" tokens) must also suppress the structured-field form, so the
+// rendered command never carries a conflicting duplicate that crashes vLLM.
+func TestBuildVLLMArgsTensorParallelDedupViaExtraArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		extraArgs []string
+	}{
+		{name: "inline value form", extraArgs: []string{"--tensor-parallel-size=4"}},
+		{name: "two-token form", extraArgs: []string{"--tensor-parallel-size", "4"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := NewTransformer()
+			md := newTestMD("test-model", "default")
+			md.Spec.Resources = &airunwayv1alpha1.ResourceSpec{
+				GPU: &airunwayv1alpha1.GPUSpec{Count: 2},
+			}
+			md.Spec.Engine.ExtraArgs = tc.extraArgs
+
+			args, err := tr.buildVLLMArgs(md, "", 0)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			// Count every occurrence of the flag in either the bare ("--tensor-parallel-size")
+			// or inline ("--tensor-parallel-size=…") form. The derived form must be
+			// suppressed so only the user's single setting remains.
+			tpCount := 0
+			for _, a := range args {
+				if a == "--tensor-parallel-size" || strings.HasPrefix(a, "--tensor-parallel-size=") {
+					tpCount++
+				}
+			}
+			if tpCount != 1 {
+				t.Fatalf("expected exactly one --tensor-parallel-size setting, got %d in %v", tpCount, args)
+			}
+		})
 	}
 }
 

@@ -197,14 +197,20 @@ func (r *VLLMProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Sync status from the primary Deployment
+	statusSynced := true
 	if len(resources) > 0 {
 		if err := r.syncStatus(ctx, &md, resources[0]); err != nil {
 			logger.Error(err, "Failed to sync status", "name", md.Name)
+			statusSynced = false
 		}
 	}
 
-	// Set phase to Deploying if not already Running or Failed
-	if md.Status.Phase != airunwayv1alpha1.DeploymentPhaseRunning &&
+	// Set phase to Deploying if not already Running or Failed. Skip this when the
+	// status sync failed: syncStatus is what promotes a deployment to Running, so
+	// a transient API error reading the upstream Deployment must not downgrade a
+	// previously-Running deployment back to Deploying on this pass.
+	if statusSynced &&
+		md.Status.Phase != airunwayv1alpha1.DeploymentPhaseRunning &&
 		md.Status.Phase != airunwayv1alpha1.DeploymentPhaseFailed {
 		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseDeploying
 		md.Status.Message = "Deployments created, waiting for pods to be ready"
@@ -395,16 +401,20 @@ func (r *VLLMProviderReconciler) handleDeletion(ctx context.Context, md *airunwa
 			return ctrl.Result{}, r.Update(ctx, md)
 		}
 
+		// The Deployment still exists. Enforce the finalizer timeout regardless of
+		// why: a Deployment that is itself stuck Terminating (its own finalizers or
+		// PDBs) means r.Delete returns nil while the object never disappears, so the
+		// timeout must be checked here — not only on a Delete error — or the
+		// ModelDeployment would requeue forever.
+		if time.Since(md.DeletionTimestamp.Time) > FinalizerTimeout {
+			logger.Info("Finalizer timeout reached, removing finalizer without waiting for deletion", "name", primaryName)
+			controllerutil.RemoveFinalizer(md, FinalizerName)
+			return ctrl.Result{}, r.Update(ctx, md)
+		}
+
 		logger.Info("Deleting primary Deployment", "name", primaryName)
 		if err := r.Delete(ctx, deploy); err != nil && !errors.IsNotFound(err) {
 			logger.Error(err, "Failed to delete Deployment")
-
-			if time.Since(md.DeletionTimestamp.Time) > FinalizerTimeout {
-				logger.Info("Finalizer timeout reached, removing finalizer without cleanup")
-				controllerutil.RemoveFinalizer(md, FinalizerName)
-				return ctrl.Result{}, r.Update(ctx, md)
-			}
-
 			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 		}
 

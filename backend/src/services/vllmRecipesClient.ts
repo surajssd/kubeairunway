@@ -20,6 +20,12 @@ const MAX_RESPONSE_BYTES = 5 * 1024 * 1024; // 5 MiB
 // block on an upstream round-trip. Entries are served stale-on-error.
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+// Hard cap on cached per-model entries. The GET /:org/:model route is
+// unauthenticated, so iterating many unique model IDs must not grow the cache
+// without bound (each entry is up to MAX_RESPONSE_BYTES). The Map's insertion
+// order is the recency order, so the least-recently-used entry is evicted first.
+const MAX_CACHE_ENTRIES = 256;
+
 /**
  * Bad client input (e.g. a malformed Hugging Face model id). Callers should map
  * this to a 4xx, never a 5xx — it is not an upstream failure.
@@ -137,6 +143,9 @@ export class VllmRecipesClient {
     const now = Date.now();
     const cached = this.modelCache.get(modelId);
     if (cached && cached.expiresAt > now) {
+      // Re-insert to move this entry to the most-recently-used position.
+      this.modelCache.delete(modelId);
+      this.modelCache.set(modelId, cached);
       return cached.value;
     }
 
@@ -161,8 +170,23 @@ export class VllmRecipesClient {
       source,
       recipe: payload,
     };
-    this.modelCache.set(modelId, { value: result, expiresAt: now + CACHE_TTL_MS });
+    this.setModelCache(modelId, { value: result, expiresAt: now + CACHE_TTL_MS });
     return result;
+  }
+
+  // setModelCache inserts an entry and evicts the least-recently-used one(s) when
+  // the cache exceeds MAX_CACHE_ENTRIES, keeping memory bounded under wide scans.
+  private setModelCache(modelId: string, entry: CacheEntry<VllmRecipeRawResponse>): void {
+    // Delete first so a re-write moves the key to the newest insertion position.
+    this.modelCache.delete(modelId);
+    this.modelCache.set(modelId, entry);
+    while (this.modelCache.size > MAX_CACHE_ENTRIES) {
+      const oldest = this.modelCache.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      this.modelCache.delete(oldest);
+    }
   }
 
   async fetchReference(reference: string): Promise<JsonRecord> {
@@ -224,8 +248,7 @@ export class VllmRecipesClient {
       throw new VllmRecipeUpstreamError(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
     }
 
-    // Reject oversized payloads up front when the server advertises a length,
-    // and bound the actual bytes read for chunked/unknown-length responses.
+    // Reject up front when the server advertises an oversized length...
     const declaredLength = Number(response.headers.get('content-length'));
     if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
       throw new VllmRecipeUpstreamError(
@@ -233,19 +256,58 @@ export class VllmRecipesClient {
       );
     }
 
-    const buffer = await response.arrayBuffer();
-    if (buffer.byteLength > MAX_RESPONSE_BYTES) {
-      throw new VllmRecipeUpstreamError(
-        `vLLM recipe response from ${url} exceeds ${MAX_RESPONSE_BYTES} bytes`
-      );
-    }
+    // ...and bound the bytes actually read so a chunked / no-content-length reply
+    // cannot stream past the cap before we reject it. Aborting the controller
+    // cancels the underlying connection.
+    const text = await this.readBoundedBody(response, url, controller);
 
     try {
-      return JSON.parse(new TextDecoder().decode(buffer)) as T;
+      return JSON.parse(text) as T;
     } catch (error) {
       throw new VllmRecipeUpstreamError(
         `vLLM recipe response from ${url} was not valid JSON: ${error instanceof Error ? error.message : String(error)}`
       );
+    }
+  }
+
+  // readBoundedBody streams the response body, aborting as soon as the running
+  // byte total exceeds MAX_RESPONSE_BYTES. Falls back to a buffered read only when
+  // the body is not a readable stream (then re-checks the size).
+  private async readBoundedBody(response: Response, url: string, controller: AbortController): Promise<string> {
+    const body = response.body;
+    if (!body || typeof body.getReader !== 'function') {
+      const buffer = await response.arrayBuffer();
+      if (buffer.byteLength > MAX_RESPONSE_BYTES) {
+        throw new VllmRecipeUpstreamError(`vLLM recipe response from ${url} exceeds ${MAX_RESPONSE_BYTES} bytes`);
+      }
+      return new TextDecoder().decode(buffer);
+    }
+
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let received = 0;
+    let text = '';
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        if (value) {
+          received += value.byteLength;
+          if (received > MAX_RESPONSE_BYTES) {
+            controller.abort();
+            throw new VllmRecipeUpstreamError(
+              `vLLM recipe response from ${url} exceeds ${MAX_RESPONSE_BYTES} bytes`
+            );
+          }
+          text += decoder.decode(value, { stream: true });
+        }
+      }
+      text += decoder.decode();
+      return text;
+    } finally {
+      reader.releaseLock();
     }
   }
 }

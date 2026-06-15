@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	airunwayv1alpha1 "github.com/kaito-project/airunway/controller/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -12,7 +13,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -424,6 +427,61 @@ func TestHandleDeletionRemovesOwnedDeployment(t *testing.T) {
 	err := c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-model"}, deploy)
 	if err == nil {
 		t.Errorf("expected owned Deployment to be deleted during finalization")
+	}
+}
+
+// A Deployment stuck Terminating (its own finalizers/PDBs) never disappears and
+// Delete returns nil, so the finalizer-timeout must fire on its own — otherwise
+// the ModelDeployment requeues forever. Regression for that nesting bug.
+func TestHandleDeletionRemovesFinalizerAfterTimeoutWhenDeploymentStuck(t *testing.T) {
+	scheme := newScheme()
+	md := newMDForController("test-model", "default")
+	controllerutil.AddFinalizer(md, FinalizerName)
+	// DeletionTimestamp older than FinalizerTimeout (5m).
+	stuck := metav1.NewTime(time.Now().Add(-10 * time.Minute))
+	md.DeletionTimestamp = &stuck
+
+	owned := &unstructured.Unstructured{}
+	owned.SetGroupVersionKind(deploymentGVK)
+	owned.SetNamespace("default")
+	owned.SetName("test-model")
+	owned.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: "airunway.ai/v1alpha1",
+		Kind:       "ModelDeployment",
+		Name:       md.Name,
+		UID:        md.UID,
+	}})
+
+	// Intercept Delete as a no-op so the Deployment stays present (simulating a
+	// stuck-Terminating object whose Delete returns nil but never completes).
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(md, owned).
+		WithStatusSubresource(md).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(_ context.Context, _ client.WithWatch, _ client.Object, _ ...client.DeleteOption) error {
+				return nil // pretend deletion was accepted but the object lingers
+			},
+		}).
+		Build()
+
+	r := NewVLLMProviderReconciler(c, scheme)
+	r.ImageResolver = successfulFakeResolver(fakeResolvedImage(DefaultVLLMImage, "sha256:default"))
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "default", Name: "test-model"},
+	}); err != nil {
+		t.Fatalf("unexpected reconcile error during deletion: %v", err)
+	}
+
+	// The finalizer must be removed so the ModelDeployment can be garbage-collected.
+	var got airunwayv1alpha1.ModelDeployment
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-model"}, &got); err != nil {
+		// If the object is gone (finalizer removed → GC'd), that also satisfies the intent.
+		return
+	}
+	if controllerutil.ContainsFinalizer(&got, FinalizerName) {
+		t.Errorf("expected finalizer to be removed after timeout, but it is still present")
 	}
 }
 

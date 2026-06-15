@@ -130,5 +130,65 @@ describe('VllmRecipesClient', () => {
         }
       );
     });
+
+    test('rejects an oversized chunked response without buffering the whole body', async () => {
+      // A response with no content-length, streamed in chunks past the cap. The
+      // streaming reader must abort before materializing the entire body.
+      let producedBytes = 0;
+      const chunk = new TextEncoder().encode('x'.repeat(512 * 1024)); // 512 KiB
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controllerObj) {
+          // Produce well past the 5 MiB cap if not stopped (20 MiB worth).
+          if (producedBytes >= 20 * 1024 * 1024) {
+            controllerObj.close();
+            return;
+          }
+          producedBytes += chunk.byteLength;
+          controllerObj.enqueue(chunk);
+        },
+      });
+
+      await withFetch(
+        (async () =>
+          new Response(stream, {
+            status: 200,
+            headers: { 'content-type': 'application/json' }, // no content-length
+          })) as unknown as typeof fetch,
+        async (client) => {
+          await expect(client.getByModelId('acme/model')).rejects.toBeInstanceOf(VllmRecipeUpstreamError);
+          // The reader must have stopped near the cap, not consumed the full 20 MiB.
+          expect(producedBytes).toBeLessThan(8 * 1024 * 1024);
+        }
+      );
+    });
+
+    test('evicts least-recently-used entries beyond the cache cap', async () => {
+      // Distinct model IDs far exceeding the cap; the first ones must be evicted
+      // (re-fetched), proving the cache does not grow without bound.
+      const calls = new Map<string, number>();
+      await withFetch(
+        (async (input: string | URL | Request) => {
+          const url = typeof input === 'string' ? input : input.toString();
+          calls.set(url, (calls.get(url) ?? 0) + 1);
+          return new Response(JSON.stringify({ recipe: true }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }) as unknown as typeof fetch,
+        async (client) => {
+          // Fill well beyond MAX_CACHE_ENTRIES (256).
+          for (let i = 0; i < 300; i++) {
+            await client.getByModelId(`org/model-${i}`);
+          }
+          // The earliest entry should have been evicted, so re-requesting it refetches.
+          await client.getByModelId('org/model-0');
+          const firstUrl = [...calls.keys()].find((u) => u.endsWith('/org/model-0.json'))!;
+          expect(calls.get(firstUrl)).toBe(2);
+          // A recent entry should still be cached (single fetch).
+          const recentUrl = [...calls.keys()].find((u) => u.endsWith('/org/model-299.json'))!;
+          expect(calls.get(recentUrl)).toBe(1);
+        }
+      );
+    });
   });
 });

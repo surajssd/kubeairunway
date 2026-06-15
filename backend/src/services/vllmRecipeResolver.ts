@@ -305,12 +305,18 @@ function selectArgv(command: JsonRecord, warnings: string[]): string[] {
 }
 
 function stripVllmServePrefix(argv: string[]): string[] {
-  if (argv.length >= 3 && argv[0] === 'vllm' && argv[1] === 'serve') {
-    return argv.slice(3);
+  // Drop the "vllm serve <model>" / "serve <model>" prefix, but only skip the
+  // positional model token when it is actually positional. A recipe that writes
+  // the model as a flag ("vllm serve --model <id> …") has a real flag in that
+  // slot, so dropping it blindly would corrupt the command line.
+  if (argv.length >= 2 && argv[0] === 'vllm' && argv[1] === 'serve') {
+    const rest = argv.slice(2);
+    return rest.length > 0 && !rest[0].startsWith('--') ? rest.slice(1) : rest;
   }
 
-  if (argv.length >= 2 && argv[0] === 'serve') {
-    return argv.slice(2);
+  if (argv.length >= 1 && argv[0] === 'serve') {
+    const rest = argv.slice(1);
+    return rest.length > 0 && !rest[0].startsWith('--') ? rest.slice(1) : rest;
   }
 
   return argv;
@@ -653,16 +659,16 @@ function applyHardwareOverrides(
 }
 
 function deriveGpuCount(command: JsonRecord, engineArgs: Record<string, string>): number {
-  const parallelismKeys = [
-    'tensor-parallel-size',
-    'pipeline-parallel-size',
-    'data-parallel-size',
-    'decode-context-parallel-size',
-  ];
+  // GPUs-per-pod is the product of the parallelism dimensions that shard a SINGLE
+  // model instance across GPUs within one pod: tensor-parallel × pipeline-parallel.
+  // data-parallel-size and decode-context-parallel-size scale the number of
+  // replicas/instances, not GPUs-per-pod, so including them over-counts (e.g.
+  // TP=4, DP=4 would otherwise request 16 GPUs in one unschedulable pod).
+  const perPodParallelismKeys = ['tensor-parallel-size', 'pipeline-parallel-size'];
 
   let product = 1;
   let found = false;
-  for (const key of parallelismKeys) {
+  for (const key of perPodParallelismKeys) {
     const value = asNumber(engineArgs[key]);
     if (value && value > 0) {
       product *= Math.trunc(value);

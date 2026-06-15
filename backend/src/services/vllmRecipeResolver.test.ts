@@ -146,4 +146,89 @@ describe('VllmRecipeResolver', () => {
 
     expect(resolved.imageRef).toBe('registry.example.com/vllm-openai:launch-phi4');
   });
+
+  test('derives GPUs-per-pod as tensor-parallel × pipeline-parallel, ignoring data-parallel', async () => {
+    const resolver = new VllmRecipeResolver(createMockClient({
+      hf_id: 'example/multi-gpu',
+      recommended_command: {
+        docker_image: 'example/vllm:latest',
+        argv: [
+          'vllm',
+          'serve',
+          'example/multi-gpu',
+          '--tensor-parallel-size',
+          '4',
+          '--pipeline-parallel-size',
+          '2',
+          '--data-parallel-size',
+          '4',
+        ],
+      },
+    }));
+
+    const resolved = await resolver.resolve({
+      modelId: 'example/multi-gpu',
+      imageChoice: { type: 'recipe' },
+    });
+
+    // 4 (TP) × 2 (PP) = 8 GPUs per pod. data-parallel-size scales replicas, not
+    // GPUs-per-pod, so it must NOT inflate this to 32.
+    expect(resolved.resources).toEqual({ gpu: 8 });
+  });
+
+  test('does not strip a leading --model flag after "vllm serve"', async () => {
+    const resolver = new VllmRecipeResolver(createMockClient({
+      hf_id: 'example/flag-model',
+      recommended_command: {
+        docker_image: 'example/vllm:latest',
+        // Model passed as a flag rather than a positional argument.
+        argv: ['vllm', 'serve', '--model', 'example/flag-model', '--tensor-parallel-size', '2'],
+      },
+    }));
+
+    const resolved = await resolver.resolve({
+      modelId: 'example/flag-model',
+      imageChoice: { type: 'recipe' },
+    });
+
+    // The --model flag must survive (not be swallowed as a positional model id).
+    expect(resolved.engineArgs).toMatchObject({ model: 'example/flag-model', 'tensor-parallel-size': '2' });
+  });
+
+  test('detects disaggregated mode from the recipe deploy_type', async () => {
+    const resolver = new VllmRecipeResolver(createMockClient({
+      hf_id: 'example/disagg',
+      recommended_command: {
+        docker_image: 'example/vllm:latest',
+        deploy_type: 'disaggregated',
+        argv: ['vllm', 'serve', 'example/disagg'],
+      },
+    }));
+
+    const resolved = await resolver.resolve({
+      modelId: 'example/disagg',
+      imageChoice: { type: 'recipe' },
+    });
+
+    expect(resolved.mode).toBe('disaggregated');
+  });
+
+  test('an explicit requested mode overrides the recipe deploy_type', async () => {
+    const resolver = new VllmRecipeResolver(createMockClient({
+      hf_id: 'example/disagg',
+      recommended_command: {
+        docker_image: 'example/vllm:latest',
+        deploy_type: 'disaggregated',
+        argv: ['vllm', 'serve', 'example/disagg'],
+      },
+    }));
+
+    const resolved = await resolver.resolve({
+      modelId: 'example/disagg',
+      mode: 'aggregated',
+      imageChoice: { type: 'recipe' },
+    });
+
+    expect(resolved.mode).toBe('aggregated');
+  });
 });

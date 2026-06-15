@@ -16,6 +16,11 @@ type ImageResolver interface {
 	Resolve(ctx context.Context, imageRef string) (*ResolvedImage, error)
 }
 
+// imageResolveTimeout bounds a single registry round-trip. The reconcile context
+// from controller-runtime has no deadline, so without this a hung or slow
+// registry would block the reconcile worker indefinitely.
+const imageResolveTimeout = 30 * time.Second
+
 // ResolvedImage contains digest resolution and provenance metadata for an image.
 type ResolvedImage struct {
 	Requested  string
@@ -50,7 +55,11 @@ func (r *RemoteImageResolver) Resolve(ctx context.Context, imageRef string) (*Re
 		return nil, fmt.Errorf("parse image reference %q: %w", requested, err)
 	}
 
-	desc, err := remote.Get(ref, remote.WithContext(ctx))
+	// Bound the registry round-trip so a hung registry cannot stall the worker.
+	resolveCtx, cancel := context.WithTimeout(ctx, imageResolveTimeout)
+	defer cancel()
+
+	desc, err := remote.Get(ref, remote.WithContext(resolveCtx))
 	if err != nil {
 		return nil, fmt.Errorf("resolve image reference %q: %w", requested, err)
 	}

@@ -1017,8 +1017,9 @@ describe('Deployment Routes', () => {
       });
 
       expect(res.status).toBe(201);
-      expect(capturedConfig.imageRef).toBe('ghcr.io/kaito-project/aikit/runners/llama-cpp-cuda:latest');
-      expect(capturedConfig.engineArgs?.ggufUrl).toBe(
+      expect(capturedConfig).toBeDefined();
+      expect(capturedConfig!.imageRef).toBe('ghcr.io/kaito-project/aikit/runners/llama-cpp-cuda:latest');
+      expect(capturedConfig!.engineArgs?.ggufUrl).toBe(
         'https://huggingface.co/unsloth/NVIDIA-Nemotron-3-Nano-4B-GGUF/resolve/main/NVIDIA-Nemotron-3-Nano-4B-Q4_K_M.gguf'
       );
     });
@@ -1060,7 +1061,8 @@ describe('Deployment Routes', () => {
       });
 
       expect(res.status).toBe(201);
-      expect(capturedConfig.imageRef).toBe('ghcr.io/kaito-project/aikit/llama3.2:3b');
+      expect(capturedConfig).toBeDefined();
+      expect(capturedConfig!.imageRef).toBe('ghcr.io/kaito-project/aikit/llama3.2:3b');
     });
 
     test('passes env through create schema to Kubernetes service', async () => {
@@ -1102,7 +1104,8 @@ describe('Deployment Routes', () => {
       });
 
       expect(res.status).toBe(201);
-      expect(capturedConfig.env).toEqual(env);
+      expect(capturedConfig).toBeDefined();
+      expect(capturedConfig!.env).toEqual(env);
     });
 
     test('accepts deployment with providerOverrides', async () => {
