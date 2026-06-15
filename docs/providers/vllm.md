@@ -118,3 +118,12 @@ spec:
 ## Image status
 
 The provider records selected image details in `status.image`, including the requested image, resolved digest when available, source classification, and verification status. Digest resolution is reused when the requested image has not changed and the status already contains a resolved digest.
+
+### Registry coupling and digest refresh
+
+Be aware of two behaviors when relying on tag-based images:
+
+- **The default image is pinned to a registry digest on the first reconcile.** If the container registry is unreachable at that moment, digest resolution fails and the deployment does not create a pod until resolution succeeds. This is deliberate — the default image is pinned for reproducibility — but it means the first reconcile is coupled to registry availability. If you need to deploy during a registry outage, set `spec.engine.image` to an image/tag you have already pulled.
+- **A resolved digest is not refreshed while the requested image is unchanged.** Once a tag such as `:cu130-nightly` has been pinned to a digest, the provider keeps reusing that digest and does **not** re-pull the moving tag on later reconciles. To pick up a newer `nightly` build, change `spec.engine.image` (for example, pin a dated tag or digest, then move it) so the requested image differs and digest resolution runs again.
+
+If a deployment is stuck because the default image could not be resolved, check `status.image.message` and the `ImageResolved` condition, then either restore registry connectivity or switch to a locally available `spec.engine.image`.

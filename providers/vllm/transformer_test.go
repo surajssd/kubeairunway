@@ -1124,3 +1124,171 @@ func assertSharedMemoryAbsent(t *testing.T, deploy *unstructured.Unstructured) {
 		t.Fatalf("expected no volumes, got %v", volumes)
 	}
 }
+
+// countArg returns how many times a flag appears in the rendered args.
+func countArg(args []string, flag string) int {
+	n := 0
+	for _, a := range args {
+		if a == flag {
+			n++
+		}
+	}
+	return n
+}
+
+// argValue returns the value following the first occurrence of flag.
+func argValue(args []string, flag string) (string, bool) {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1], true
+		}
+	}
+	return "", false
+}
+
+// An explicit spec.engine.args entry must override the flag we derive from the
+// GPU count, so editing GPUs after applying a recipe can never emit two
+// conflicting --tensor-parallel-size flags. Regression for the TP-duplication bug.
+func TestBuildVLLMArgsTensorParallelDedup(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Resources = &airunwayv1alpha1.ResourceSpec{
+		GPU: &airunwayv1alpha1.GPUSpec{Count: 2},
+	}
+	md.Spec.Engine.Args = map[string]string{
+		"tensor-parallel-size": "4",
+	}
+
+	args, err := tr.buildVLLMArgs(md, "", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := countArg(args, "--tensor-parallel-size"); got != 1 {
+		t.Fatalf("expected exactly one --tensor-parallel-size, got %d in %v", got, args)
+	}
+	if value, _ := argValue(args, "--tensor-parallel-size"); value != "4" {
+		t.Errorf("expected explicit engine.args value 4 to win, got %q", value)
+	}
+}
+
+// The same dedup must hold for the other derived flags so an explicit engine.args
+// entry is never duplicated by the structured-field renderer.
+func TestBuildVLLMArgsDerivedFlagDedup(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	ctxLen := int32(4096)
+	md.Spec.Engine.ContextLength = &ctxLen
+	md.Spec.Model.ServedName = "alias"
+	md.Spec.Engine.Args = map[string]string{
+		"model":             "override/model",
+		"max-model-len":     "8192",
+		"served-model-name": "override-alias",
+	}
+
+	args, err := tr.buildVLLMArgs(md, "", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, flag := range []string{"--model", "--max-model-len", "--served-model-name"} {
+		if got := countArg(args, flag); got != 1 {
+			t.Errorf("expected exactly one %s, got %d in %v", flag, got, args)
+		}
+	}
+	if value, _ := argValue(args, "--model"); value != "override/model" {
+		t.Errorf("expected explicit model override to win, got %q", value)
+	}
+}
+
+func TestBuildVLLMArgsEnforceEagerAndPrefixCaching(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Engine.EnforceEager = true
+	md.Spec.Engine.EnablePrefixCaching = true
+
+	args, err := tr.buildVLLMArgs(md, "", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertFlag(t, args, "--enforce-eager")
+	assertFlag(t, args, "--enable-prefix-caching")
+}
+
+func TestBuildVLLMArgsOmitsEnforceEagerWhenDisabled(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	// EnforceEager / EnablePrefixCaching default to false
+
+	args, err := tr.buildVLLMArgs(md, "", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertNoArg(t, args, "--enforce-eager")
+	assertNoArg(t, args, "--enable-prefix-caching")
+}
+
+// A user must not be able to slip a reserved host/port override past the guard
+// using the flag form ("--port") or inline-value form ("--port=9000") as a map key.
+func TestValidateReservedVLLMServerArgsRejectsDashAndEqualForms(t *testing.T) {
+	cases := []map[string]string{
+		{"--port": "9000"},
+		{"--host": "127.0.0.1"},
+		{"--port=9000": ""},
+		{"port": "9000"},
+	}
+	for _, engineArgs := range cases {
+		if err := validateReservedVLLMServerArgs(engineArgs, nil); err == nil {
+			t.Errorf("expected reserved-arg rejection for %v", engineArgs)
+		}
+	}
+}
+
+func TestTransformMountsModelStorageVolumes(t *testing.T) {
+	tr := NewTransformer()
+	md := newTestMD("test-model", "default")
+	md.Spec.Model.Storage = &airunwayv1alpha1.StorageSpec{
+		Volumes: []airunwayv1alpha1.StorageVolume{
+			{
+				Name:      "model-cache",
+				ClaimName: "shared-model-cache",
+				MountPath: "/model-cache",
+				ReadOnly:  true,
+			},
+		},
+	}
+
+	resources, err := tr.Transform(context.Background(), md)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	deploy := resources[0]
+	container := getContainer(t, deploy)
+	mounts, ok := container["volumeMounts"].([]interface{})
+	if !ok || len(mounts) != 1 {
+		t.Fatalf("expected one volumeMount, got %v", container["volumeMounts"])
+	}
+	mount := mounts[0].(map[string]interface{})
+	if mount["name"] != "model-cache" || mount["mountPath"] != "/model-cache" {
+		t.Errorf("unexpected volumeMount %v", mount)
+	}
+	if mount["readOnly"] != true {
+		t.Errorf("expected readOnly volumeMount, got %v", mount["readOnly"])
+	}
+
+	volumes, found, _ := unstructured.NestedSlice(deploy.Object, "spec", "template", "spec", "volumes")
+	if !found || len(volumes) != 1 {
+		t.Fatalf("expected one volume, got %v (found=%v)", volumes, found)
+	}
+	volume := volumes[0].(map[string]interface{})
+	pvc, ok := volume["persistentVolumeClaim"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected persistentVolumeClaim volume, got %v", volume)
+	}
+	if pvc["claimName"] != "shared-model-cache" {
+		t.Errorf("expected claimName shared-model-cache, got %v", pvc["claimName"])
+	}
+}

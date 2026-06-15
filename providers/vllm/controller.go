@@ -247,10 +247,14 @@ func (r *VLLMProviderReconciler) validateCompatibility(md *airunwayv1alpha1.Mode
 type resourceConflictError struct {
 	namespace string
 	name      string
+	owner     string
 }
 
 func (e *resourceConflictError) Error() string {
-	return fmt.Sprintf("resource %s/%s exists but is not managed by this ModelDeployment", e.namespace, e.name)
+	if e.owner != "" {
+		return fmt.Sprintf("resource %s/%s exists but is not managed by this ModelDeployment (owned by %s)", e.namespace, e.name, e.owner)
+	}
+	return fmt.Sprintf("resource %s/%s exists but is not managed by this ModelDeployment (no owner references)", e.namespace, e.name)
 }
 
 // isResourceConflict checks whether the error is a resource ownership conflict
@@ -266,7 +270,24 @@ func verifyOwnerReference(existing *unstructured.Unstructured, mdUID types.UID) 
 			return nil
 		}
 	}
-	return &resourceConflictError{namespace: existing.GetNamespace(), name: existing.GetName()}
+	return &resourceConflictError{
+		namespace: existing.GetNamespace(),
+		name:      existing.GetName(),
+		owner:     describeOwnerReferences(existing.GetOwnerReferences()),
+	}
+}
+
+// describeOwnerReferences renders a human-readable list of the owners of a
+// resource so an ownership-conflict error names who actually holds it.
+func describeOwnerReferences(refs []metav1.OwnerReference) string {
+	if len(refs) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		parts = append(parts, fmt.Sprintf("%s/%s (uid %s)", ref.Kind, ref.Name, ref.UID))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // createOrUpdateResource creates or updates an unstructured resource using server-side apply.

@@ -11,7 +11,48 @@ const DEFAULT_RECIPES_BASE_URL = 'https://recipes.vllm.ai';
 // tie up request handlers and degrade backend availability.
 const FETCH_TIMEOUT_MS = 10_000;
 
+// Cap recipe payload size. VLLM_RECIPES_BASE_URL is operator-configurable, so an
+// oversized models.json/recipe must not be able to pressure backend memory.
+const MAX_RESPONSE_BYTES = 5 * 1024 * 1024; // 5 MiB
+
+// Short in-memory cache for the recipe index and per-model payloads. The design
+// requires caching so repeated UI refreshes / concurrent resolves don't each
+// block on an upstream round-trip. Entries are served stale-on-error.
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Bad client input (e.g. a malformed Hugging Face model id). Callers should map
+ * this to a 4xx, never a 5xx — it is not an upstream failure.
+ */
+export class VllmRecipeValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VllmRecipeValidationError';
+  }
+}
+
+/** The upstream recipes host timed out. Callers should map to 504. */
+export class VllmRecipeTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VllmRecipeTimeoutError';
+  }
+}
+
+/** The upstream recipes host failed or returned an unusable payload. Map to 502. */
+export class VllmRecipeUpstreamError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VllmRecipeUpstreamError';
+  }
+}
+
 type JsonRecord = Record<string, unknown>;
+
+interface CacheEntry<T> {
+  value: T;
+  expiresAt: number;
+}
 
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -24,18 +65,21 @@ function splitModelId(modelId: string): { org: string; model: string } {
   // recipes base path when the segments are interpolated into a fetch URL.
   const segments = modelId.split('/');
   if (segments.length !== 2) {
-    throw new Error(`Invalid Hugging Face model ID: ${modelId}`);
+    throw new VllmRecipeValidationError(`Invalid Hugging Face model ID: ${modelId}`);
   }
 
   const [org, model] = segments;
   if (!org || !model || org === '.' || org === '..' || model === '.' || model === '..') {
-    throw new Error(`Invalid Hugging Face model ID: ${modelId}`);
+    throw new VllmRecipeValidationError(`Invalid Hugging Face model ID: ${modelId}`);
   }
 
   return { org, model };
 }
 
 export class VllmRecipesClient {
+  private listCache?: CacheEntry<VllmRecipeListResponse>;
+  private readonly modelCache = new Map<string, CacheEntry<VllmRecipeRawResponse>>();
+
   constructor(private readonly baseUrl = process.env.VLLM_RECIPES_BASE_URL || DEFAULT_RECIPES_BASE_URL) {}
 
   get sourceBaseUrl(): string {
@@ -43,8 +87,23 @@ export class VllmRecipesClient {
   }
 
   async list(): Promise<VllmRecipeListResponse> {
+    const now = Date.now();
+    if (this.listCache && this.listCache.expiresAt > now) {
+      return this.listCache.value;
+    }
+
     const source = `${this.sourceBaseUrl}/models.json`;
-    const payload = await this.fetchJson<unknown>(source);
+    let payload: unknown;
+    try {
+      payload = await this.fetchJson<unknown>(source);
+    } catch (error) {
+      // Serve the last good index on a transient upstream failure.
+      if (this.listCache) {
+        logger.warn({ error }, 'Serving stale vLLM recipe index after upstream failure');
+        return this.listCache.value;
+      }
+      throw error;
+    }
 
     let entries: unknown;
     if (Array.isArray(payload)) {
@@ -54,16 +113,18 @@ export class VllmRecipesClient {
     }
 
     if (!Array.isArray(entries)) {
-      throw new Error('vLLM recipe index did not contain a models array');
+      throw new VllmRecipeUpstreamError('vLLM recipe index did not contain a models array');
     }
 
     const recipes = entries.filter(isRecord).map((entry) => ({ ...entry }) as VllmRecipeIndexEntry);
 
-    return {
+    const result: VllmRecipeListResponse = {
       recipes,
       total: recipes.length,
       source,
     };
+    this.listCache = { value: result, expiresAt: now + CACHE_TTL_MS };
+    return result;
   }
 
   async get(org: string, model: string): Promise<VllmRecipeRawResponse> {
@@ -72,18 +133,36 @@ export class VllmRecipesClient {
 
   async getByModelId(modelId: string): Promise<VllmRecipeRawResponse> {
     const { org, model } = splitModelId(modelId);
-    const source = `${this.sourceBaseUrl}/${encodeURIComponent(org)}/${encodeURIComponent(model)}.json`;
-    const payload = await this.fetchJson<unknown>(source);
 
-    if (!isRecord(payload)) {
-      throw new Error(`vLLM recipe payload for ${modelId} was not a JSON object`);
+    const now = Date.now();
+    const cached = this.modelCache.get(modelId);
+    if (cached && cached.expiresAt > now) {
+      return cached.value;
     }
 
-    return {
+    const source = `${this.sourceBaseUrl}/${encodeURIComponent(org)}/${encodeURIComponent(model)}.json`;
+    let payload: unknown;
+    try {
+      payload = await this.fetchJson<unknown>(source);
+    } catch (error) {
+      if (cached) {
+        logger.warn({ error, modelId }, 'Serving stale vLLM recipe after upstream failure');
+        return cached.value;
+      }
+      throw error;
+    }
+
+    if (!isRecord(payload)) {
+      throw new VllmRecipeUpstreamError(`vLLM recipe payload for ${modelId} was not a JSON object`);
+    }
+
+    const result: VllmRecipeRawResponse = {
       modelId,
       source,
       recipe: payload,
     };
+    this.modelCache.set(modelId, { value: result, expiresAt: now + CACHE_TTL_MS });
+    return result;
   }
 
   async fetchReference(reference: string): Promise<JsonRecord> {
@@ -91,7 +170,7 @@ export class VllmRecipesClient {
     const payload = await this.fetchJson<unknown>(source);
 
     if (!isRecord(payload)) {
-      throw new Error(`vLLM recipe reference ${source} was not a JSON object`);
+      throw new VllmRecipeUpstreamError(`vLLM recipe reference ${source} was not a JSON object`);
     }
 
     return payload;
@@ -102,15 +181,15 @@ export class VllmRecipesClient {
     const resolved = new URL(reference, baseUrl);
 
     if (resolved.protocol !== 'https:') {
-      throw new Error(`vLLM recipe references must use HTTPS: ${reference}`);
+      throw new VllmRecipeValidationError(`vLLM recipe references must use HTTPS: ${reference}`);
     }
 
     if (resolved.origin !== baseUrl.origin) {
-      throw new Error(`vLLM recipe references must stay under ${baseUrl.origin}: ${reference}`);
+      throw new VllmRecipeValidationError(`vLLM recipe references must stay under ${baseUrl.origin}: ${reference}`);
     }
 
     if (!resolved.pathname.startsWith(baseUrl.pathname)) {
-      throw new Error(`vLLM recipe references must stay under ${this.sourceBaseUrl}: ${reference}`);
+      throw new VllmRecipeValidationError(`vLLM recipe references must stay under ${this.sourceBaseUrl}: ${reference}`);
     }
 
     return resolved.toString();
@@ -132,18 +211,42 @@ export class VllmRecipesClient {
       });
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error(`Timed out fetching ${url} after ${FETCH_TIMEOUT_MS}ms`);
+        throw new VllmRecipeTimeoutError(`Timed out fetching ${url} after ${FETCH_TIMEOUT_MS}ms`);
       }
-      throw error;
+      throw new VllmRecipeUpstreamError(
+        `Failed to reach ${url}: ${error instanceof Error ? error.message : String(error)}`
+      );
     } finally {
       clearTimeout(timeoutId);
     }
 
     if (!response.ok) {
-      throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
+      throw new VllmRecipeUpstreamError(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
     }
 
-    return (await response.json()) as T;
+    // Reject oversized payloads up front when the server advertises a length,
+    // and bound the actual bytes read for chunked/unknown-length responses.
+    const declaredLength = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
+      throw new VllmRecipeUpstreamError(
+        `vLLM recipe response from ${url} exceeds ${MAX_RESPONSE_BYTES} bytes (content-length ${declaredLength})`
+      );
+    }
+
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > MAX_RESPONSE_BYTES) {
+      throw new VllmRecipeUpstreamError(
+        `vLLM recipe response from ${url} exceeds ${MAX_RESPONSE_BYTES} bytes`
+      );
+    }
+
+    try {
+      return JSON.parse(new TextDecoder().decode(buffer)) as T;
+    } catch (error) {
+      throw new VllmRecipeUpstreamError(
+        `vLLM recipe response from ${url} was not valid JSON: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 }
 

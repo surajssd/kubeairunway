@@ -2,10 +2,33 @@ import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { z } from 'zod';
 import { HTTPException } from 'hono/http-exception';
+import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { VllmRecipeResolveRequest } from '@airunway/shared';
-import { vllmRecipesClient } from '../services/vllmRecipesClient';
+import {
+  vllmRecipesClient,
+  VllmRecipeValidationError,
+  VllmRecipeTimeoutError,
+} from '../services/vllmRecipesClient';
 import { vllmRecipeResolver } from '../services/vllmRecipeResolver';
 import logger from '../lib/logger';
+
+// Map recipe errors to HTTP status so callers can distinguish bad input
+// (4xx, do not retry) from an upstream recipes.vllm.ai outage (5xx).
+function recipeErrorStatus(error: unknown): ContentfulStatusCode {
+  if (error instanceof VllmRecipeValidationError) {
+    return 400;
+  }
+  if (error instanceof VllmRecipeTimeoutError) {
+    return 504;
+  }
+  return 502;
+}
+
+function recipeHttpException(error: unknown, fallbackMessage: string): HTTPException {
+  return new HTTPException(recipeErrorStatus(error), {
+    message: error instanceof Error ? error.message : fallbackMessage,
+  });
+}
 
 const imageChoiceSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('recipe') }),
@@ -34,9 +57,7 @@ const vllmRecipes = new Hono()
       return c.json(result);
     } catch (error) {
       logger.error({ error }, 'Failed to list vLLM recipes');
-      throw new HTTPException(502, {
-        message: error instanceof Error ? error.message : 'Failed to list vLLM recipes',
-      });
+      throw recipeHttpException(error, 'Failed to list vLLM recipes');
     }
   })
 
@@ -52,9 +73,7 @@ const vllmRecipes = new Hono()
       return c.json(result);
     } catch (error) {
       logger.error({ error, modelId: request.modelId }, 'Failed to resolve vLLM recipe');
-      throw new HTTPException(502, {
-        message: error instanceof Error ? error.message : 'Failed to resolve vLLM recipe',
-      });
+      throw recipeHttpException(error, 'Failed to resolve vLLM recipe');
     }
   })
 
@@ -76,9 +95,7 @@ const vllmRecipes = new Hono()
       return c.json(result);
     } catch (error) {
       logger.error({ error, org, model }, 'Failed to fetch vLLM recipe');
-      throw new HTTPException(502, {
-        message: error instanceof Error ? error.message : 'Failed to fetch vLLM recipe',
-      });
+      throw recipeHttpException(error, 'Failed to fetch vLLM recipe');
     }
   });
 

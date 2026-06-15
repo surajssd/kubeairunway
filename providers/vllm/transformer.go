@@ -120,6 +120,12 @@ func (t *Transformer) transformDisaggregated(md *airunwayv1alpha1.ModelDeploymen
 	if md.Spec.Scaling.Prefill == nil {
 		return nil, fmt.Errorf("spec.scaling.prefill is required for disaggregated serving mode")
 	}
+	if md.Spec.Scaling.Decode.GPU == nil {
+		return nil, fmt.Errorf("spec.scaling.decode.gpu is required for disaggregated serving mode")
+	}
+	if md.Spec.Scaling.Prefill.GPU == nil {
+		return nil, fmt.Errorf("spec.scaling.prefill.gpu is required for disaggregated serving mode")
+	}
 
 	decodeResources := componentToResourceSpec(md.Spec.Scaling.Decode)
 	prefillResources := componentToResourceSpec(md.Spec.Scaling.Prefill)
@@ -222,8 +228,13 @@ func (t *Transformer) buildDeployment(md *airunwayv1alpha1.ModelDeployment, name
 		"containers": []interface{}{container},
 	}
 
+	var volumes []interface{}
 	if requiresSharedMemoryVolume(resources) {
-		podSpec["volumes"] = []interface{}{buildSharedMemoryVolume()}
+		volumes = append(volumes, buildSharedMemoryVolume())
+	}
+	volumes = append(volumes, buildStorageVolumes(md)...)
+	if len(volumes) > 0 {
+		podSpec["volumes"] = volumes
 	}
 
 	if len(md.Spec.NodeSelector) > 0 {
@@ -338,8 +349,13 @@ func (t *Transformer) buildContainer(md *airunwayv1alpha1.ModelDeployment, image
 		"readinessProbe": buildReadinessProbe(),
 	}
 
+	var volumeMounts []interface{}
 	if requiresSharedMemoryVolume(resources) {
-		container["volumeMounts"] = []interface{}{buildSharedMemoryVolumeMount()}
+		volumeMounts = append(volumeMounts, buildSharedMemoryVolumeMount())
+	}
+	volumeMounts = append(volumeMounts, buildStorageVolumeMounts(md)...)
+	if len(volumeMounts) > 0 {
+		container["volumeMounts"] = volumeMounts
 	}
 
 	// Resource limits/requests
@@ -367,25 +383,50 @@ func (t *Transformer) buildVLLMArgs(md *airunwayv1alpha1.ModelDeployment, kvTran
 		return nil, err
 	}
 
+	// A flag we derive from structured spec fields (e.g. --tensor-parallel-size
+	// from the GPU count) must yield to an explicit spec.engine.args entry of the
+	// same key. Recipes fold tensor parallelism into BOTH resources.gpu and
+	// engine.args; the GPU count is user-editable after a recipe is applied, so
+	// emitting our derived flag unconditionally would produce a conflicting
+	// duplicate (e.g. "--tensor-parallel-size 2 … --tensor-parallel-size 4") and
+	// crash vLLM. When the user supplies the key explicitly, that value wins and
+	// we skip our derived form.
+	hasExplicitArg := func(key string) bool {
+		_, ok := md.Spec.Engine.Args[key]
+		return ok
+	}
+
 	// Listen on the same host/port exposed by the generated container, Service, and probes.
 	args = append(args, "--host", DefaultVLLMHost, "--port", fmt.Sprintf("%d", DefaultVLLMPort))
 
 	// Model
-	args = append(args, "--model", md.Spec.Model.ID)
+	if !hasExplicitArg("model") {
+		args = append(args, "--model", md.Spec.Model.ID)
+	}
 
 	// Served model name
-	if md.Spec.Model.ServedName != "" {
+	if md.Spec.Model.ServedName != "" && !hasExplicitArg("served-model-name") {
 		args = append(args, "--served-model-name", md.Spec.Model.ServedName)
 	}
 
 	// Context length
-	if md.Spec.Engine.ContextLength != nil {
+	if md.Spec.Engine.ContextLength != nil && !hasExplicitArg("max-model-len") {
 		args = append(args, "--max-model-len", fmt.Sprintf("%d", *md.Spec.Engine.ContextLength))
 	}
 
 	// Trust remote code
-	if md.Spec.Engine.TrustRemoteCode {
+	if md.Spec.Engine.TrustRemoteCode && !hasExplicitArg("trust-remote-code") {
 		args = append(args, "--trust-remote-code")
+	}
+
+	// Enforce eager mode (disable CUDA graph capture)
+	if md.Spec.Engine.EnforceEager && !hasExplicitArg("enforce-eager") {
+		args = append(args, "--enforce-eager")
+	}
+
+	// Prefix caching
+	if md.Spec.Engine.EnablePrefixCaching && !hasExplicitArg("enable-prefix-caching") {
+		args = append(args, "--enable-prefix-caching")
 	}
 
 	// Tensor parallelism from GPU count
@@ -393,7 +434,7 @@ func (t *Transformer) buildVLLMArgs(md *airunwayv1alpha1.ModelDeployment, kvTran
 	if tpCount == 0 && md.Spec.Resources != nil && md.Spec.Resources.GPU != nil {
 		tpCount = md.Spec.Resources.GPU.Count
 	}
-	if tpCount > 1 {
+	if tpCount > 1 && !hasExplicitArg("tensor-parallel-size") {
 		args = append(args, "--tensor-parallel-size", fmt.Sprintf("%d", tpCount))
 	}
 
@@ -445,7 +486,18 @@ func validateReservedVLLMServerArgs(engineArgs map[string]string, extraArgs []st
 }
 
 func isReservedVLLMServerArg(key string) bool {
-	switch strings.TrimSpace(key) {
+	// Normalize the key the same way for both the engineArgs map form ("port")
+	// and a user that writes the flag form as a map key ("--port") or with an
+	// inline value ("--port=9000"): strip leading dashes and any "=value" suffix
+	// so neither form can slip a host/port override past the guard.
+	normalized := strings.TrimSpace(key)
+	normalized = strings.TrimLeft(normalized, "-")
+	if equalIndex := strings.Index(normalized, "="); equalIndex >= 0 {
+		normalized = normalized[:equalIndex]
+	}
+	normalized = strings.TrimSpace(normalized)
+
+	switch normalized {
 	case "host", "port":
 		return true
 	default:
@@ -515,6 +567,68 @@ func buildSharedMemoryVolume() map[string]interface{} {
 			"sizeLimit": DefaultVLLMShmSize,
 		},
 	}
+}
+
+// storageVolumeMountPath returns the in-container mount path for a storage
+// volume, falling back to the purpose-based defaults the mutating webhook
+// normally applies. The fallback keeps PVC mounts working when admission is
+// bypassed (unit tests, direct API access without webhooks).
+func storageVolumeMountPath(vol airunwayv1alpha1.StorageVolume) string {
+	if vol.MountPath != "" {
+		return vol.MountPath
+	}
+	switch vol.Purpose {
+	case airunwayv1alpha1.VolumePurposeModelCache:
+		return "/model-cache"
+	case airunwayv1alpha1.VolumePurposeCompilationCache:
+		return "/compilation-cache"
+	default:
+		return ""
+	}
+}
+
+// buildStorageVolumes renders pod-level volumes for each PVC-backed entry in
+// spec.model.storage. Each volume references its (possibly auto-generated) PVC
+// claim name so the inference pod can mount HF/cache storage.
+func buildStorageVolumes(md *airunwayv1alpha1.ModelDeployment) []interface{} {
+	if md.Spec.Model.Storage == nil {
+		return nil
+	}
+	var volumes []interface{}
+	for _, vol := range md.Spec.Model.Storage.Volumes {
+		volumes = append(volumes, map[string]interface{}{
+			"name": vol.Name,
+			"persistentVolumeClaim": map[string]interface{}{
+				"claimName": vol.ResolvedClaimName(md.Name),
+			},
+		})
+	}
+	return volumes
+}
+
+// buildStorageVolumeMounts renders the container volumeMounts for each storage
+// volume. Volumes without a resolvable mount path are skipped (custom-purpose
+// volumes require an explicit mountPath, enforced by the webhook).
+func buildStorageVolumeMounts(md *airunwayv1alpha1.ModelDeployment) []interface{} {
+	if md.Spec.Model.Storage == nil {
+		return nil
+	}
+	var mounts []interface{}
+	for _, vol := range md.Spec.Model.Storage.Volumes {
+		mountPath := storageVolumeMountPath(vol)
+		if mountPath == "" {
+			continue
+		}
+		mount := map[string]interface{}{
+			"name":      vol.Name,
+			"mountPath": mountPath,
+		}
+		if vol.ReadOnly {
+			mount["readOnly"] = true
+		}
+		mounts = append(mounts, mount)
+	}
+	return mounts
 }
 
 // buildResourceLimits creates resource limits and requests from ResourceSpec.
