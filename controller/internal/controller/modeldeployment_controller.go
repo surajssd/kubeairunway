@@ -282,7 +282,29 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 
-	// Step 7: Run provider selection if needed
+	// Step 7: Reject an unsupported provider switch. Once a provider is recorded
+	// in status, re-pointing spec.provider.name to a different provider is not yet
+	// supported: the previously-selected provider's resources and finalizer would
+	// be orphaned because provider controllers only clean up on ModelDeployment
+	// deletion, not on deselection (tracked in
+	// https://github.com/kaito-project/airunway/issues/325). Fail explicitly here
+	// rather than silently keeping the old provider, so the conflict is visible.
+	if md.Spec.Provider != nil && md.Spec.Provider.Name != "" &&
+		md.Status.Provider != nil && md.Status.Provider.Name != "" &&
+		md.Spec.Provider.Name != md.Status.Provider.Name {
+		msg := fmt.Sprintf(
+			"changing spec.provider.name from %q to %q after a provider has been selected is not supported; delete and recreate the ModelDeployment to use a different provider",
+			md.Status.Provider.Name, md.Spec.Provider.Name,
+		)
+		logger.Info("Rejected unsupported provider change", "name", md.Name, "from", md.Status.Provider.Name, "to", md.Spec.Provider.Name)
+		r.setCondition(&md, airunwayv1alpha1.ConditionTypeProviderSelected, metav1.ConditionFalse, "ProviderChangeNotSupported", msg)
+		md.Status.Phase = airunwayv1alpha1.DeploymentPhaseFailed
+		md.Status.Message = msg
+		r.recordReconcileError(&md, "provider_change")
+		return ctrl.Result{}, r.Status().Patch(ctx, &md, client.MergeFrom(base))
+	}
+
+	// Step 8: Run provider selection if needed
 	if r.EnableProviderSelector {
 		if err := r.selectProvider(ctx, &md, providerConfigs, resolvedEngineType, resolvedServingMode); err != nil {
 			logger.Error(err, "Provider selection failed", "name", md.Name)
@@ -293,7 +315,7 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		}
 	}
 
-	// Step 8: Update status
+	// Step 9: Update status
 	// If no provider is selected yet, stay in Pending
 	if md.Status.Provider == nil || md.Status.Provider.Name == "" {
 		if md.Spec.Provider != nil && md.Spec.Provider.Name != "" {
@@ -323,7 +345,7 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// - status.endpoint
 	// - ProviderCompatible, ResourceCreated, Ready conditions
 
-	// Step 9: Reconcile gateway resources (InferencePool + HTTPRoute) when deployment is running
+	// Step 10: Reconcile gateway resources (InferencePool + HTTPRoute) when deployment is running
 	if md.Status.Phase == airunwayv1alpha1.DeploymentPhaseRunning {
 		if md.Spec.Gateway != nil && md.Spec.Gateway.Enabled != nil && !*md.Spec.Gateway.Enabled {
 			// Gateway explicitly disabled — clean up any existing resources
