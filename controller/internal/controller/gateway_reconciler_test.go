@@ -1277,6 +1277,127 @@ func TestGateway_EnsureRetriesOnConflictAndPreservesUnion(t *testing.T) {
 	}
 }
 
+// TestGateway_EnsureRetriesOnRealOptimisticLockConflict is the companion to
+// TestGateway_EnsureRetriesOnConflictAndPreservesUnion. That test injects the 409
+// synthetically, so it would still pass if MergeFromWithOptimisticLock were
+// downgraded to a plain MergeFrom. This test instead lets the fake client's OWN
+// optimistic-lock machinery raise the conflict: a concurrent writer bumps the
+// stored resourceVersion after our helper's first Get, so the subsequent
+// optimistic-lock Patch carries a stale resourceVersion and the client rejects it
+// with a real 409 ("object was modified"). If the optimistic lock is removed the
+// stale patch merges silently, no conflict is raised, no retry happens, and the
+// concurrent writer's namespace (team-c) is clobbered — failing this test.
+func TestGateway_EnsureRetriesOnRealOptimisticLockConflict(t *testing.T) {
+	scheme := newTestScheme()
+	// Gateway starts allowing gateway-ns and team-a.
+	gw := gwWithNamespaceSelector("my-gateway", "gateway-ns", "gateway-ns", "team-a")
+	md := newModelDeployment("test-model", "team-b")
+
+	detector := fakeDetector(true, "my-gateway", "gateway-ns")
+	detector.PatchGateway = true
+
+	base := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&airunwayv1alpha1.ModelDeployment{}).
+		WithObjects(md, gw).
+		Build()
+
+	var getCalls, patchCalls int
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := cl.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if _, ok := obj.(*gatewayv1.Gateway); !ok {
+				return nil
+			}
+			getCalls++
+			if getCalls == 1 {
+				// A concurrent writer lands AFTER our helper's first read but
+				// BEFORE its patch: add team-c and let the fake client bump the
+				// stored resourceVersion. Our helper still holds the pre-bump
+				// object, so its optimistic-lock patch will be stale -> real 409.
+				var stored gatewayv1.Gateway
+				if err := base.Get(ctx, key, &stored); err != nil {
+					return err
+				}
+				fromSelector := gatewayv1.NamespacesFromSelector
+				storedBase := stored.DeepCopy()
+				for i := range stored.Spec.Listeners {
+					stored.Spec.Listeners[i].AllowedRoutes = &gatewayv1.AllowedRoutes{
+						Namespaces: &gatewayv1.RouteNamespaces{
+							From: &fromSelector,
+							Selector: &metav1.LabelSelector{
+								MatchExpressions: []metav1.LabelSelectorRequirement{{
+									Key:      "kubernetes.io/metadata.name",
+									Operator: metav1.LabelSelectorOpIn,
+									Values:   []string{"gateway-ns", "team-a", "team-c"},
+								}},
+							},
+						},
+					}
+				}
+				if err := base.Patch(ctx, &stored, client.MergeFrom(storedBase)); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+		Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, ok := obj.(*gatewayv1.Gateway); ok {
+				patchCalls++
+			}
+			return cl.Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	r := &ModelDeploymentReconciler{
+		Client:           c,
+		Scheme:           scheme,
+		GatewayDetector:  detector,
+		ProviderResolver: gateway.NewInferenceProviderConfigResolver(c),
+	}
+	ctx := context.Background()
+
+	gwConfig := &gateway.GatewayConfig{GatewayName: "my-gateway", GatewayNamespace: "gateway-ns"}
+	if err := r.ensureGatewayAllowsNamespace(ctx, gwConfig, "team-b"); err != nil {
+		t.Fatalf("ensureGatewayAllowsNamespace failed: %v", err)
+	}
+
+	// The helper must have retried: >=2 gets (initial + post-conflict re-read) and
+	// >=2 patch attempts (the stale one that 409'd + the successful retry).
+	if getCalls < 2 {
+		t.Errorf("expected at least 2 gets (initial + post-conflict re-read), got %d", getCalls)
+	}
+	if patchCalls < 2 {
+		t.Errorf("expected at least 2 patch attempts (1 real 409 + 1 success), got %d", patchCalls)
+	}
+
+	// team-c (concurrent) AND team-b (ours) both survive: proof the retry re-read
+	// fresh state and unioned rather than clobbering.
+	var finalGW gatewayv1.Gateway
+	if err := r.Get(ctx, types.NamespacedName{Name: "my-gateway", Namespace: "gateway-ns"}, &finalGW); err != nil {
+		t.Fatalf("failed to get Gateway: %v", err)
+	}
+	for _, l := range finalGW.Spec.Listeners {
+		sel := l.AllowedRoutes.Namespaces.Selector
+		if sel == nil || len(sel.MatchExpressions) == 0 {
+			t.Fatal("expected matchExpressions to be set")
+		}
+		values := sel.MatchExpressions[0].Values
+		want := []string{"gateway-ns", "team-a", "team-b", "team-c"}
+		if len(values) != len(want) {
+			t.Fatalf("expected %v, got %v", want, values)
+		}
+		for i := range want {
+			if values[i] != want[i] {
+				t.Errorf("expected %v, got %v", want, values)
+				break
+			}
+		}
+	}
+}
+
 func TestGateway_CleanupRevertsAllowedRoutes(t *testing.T) {
 	scheme := newTestScheme()
 	gw := gwWithNamespaceSelector("my-gateway", "gateway-ns", "model-ns")

@@ -1043,11 +1043,18 @@ func (r *ModelDeploymentReconciler) discoverModelName(ctx context.Context, servi
 func (r *ModelDeploymentReconciler) ensureGatewayAllowsNamespace(ctx context.Context, gwConfig *gateway.GatewayConfig, namespace string) error {
 	changed, err := r.updateGatewayAllowedNamespaces(ctx, gwConfig, func(crossNs map[string]bool) (map[string]bool, bool) {
 		if crossNs[namespace] {
-			// Already allowed. Note this only short-circuits when the desired
-			// namespace is already present; a Gateway stuck in the pre-#333
-			// broken state (a Selector missing its own namespace) self-heals the
-			// next time a genuinely new namespace is added, not on every
-			// reconcile.
+			// Already allowed for this namespace — nothing to do.
+			//
+			// Self-heal is deliberately narrow: a Gateway stuck in the pre-#333
+			// broken state (a Selector present but missing its own namespace) is
+			// repaired only when the cross-namespace set actually changes — i.e.
+			// when a genuinely NEW namespace is added here, or when the last
+			// cross-namespace tenant is removed on the cleanup path (which reverts
+			// to `from: Same`). It does NOT heal on a same-namespace re-reconcile
+			// of an already-stuck Gateway: if `namespace` is the only tenant and
+			// it is already listed, this short-circuit returns without a patch and
+			// gateway-ns stays evicted. That single-tenant-after-upgrade case must
+			// be healed by adding another namespace or deleting the MD.
 			return crossNs, false
 		}
 		crossNs[namespace] = true
@@ -1111,11 +1118,18 @@ func (r *ModelDeploymentReconciler) updateGatewayAllowedNamespaces(
 		}
 
 		base := gw.DeepCopy()
-		applyAllowedRoutes(&gw, stripNamespace(desired, gw.Namespace), gw.Namespace)
+		// desired is already free of gw.Namespace: crossCur was stripped above and
+		// none of the callbacks add the Gateway's own namespace (the caller only
+		// invokes this for cross-namespace MDs), so applyAllowedRoutes's
+		// precondition holds without re-stripping here.
+		applyAllowedRoutes(&gw, desired, gw.Namespace)
 		return r.Patch(ctx, &gw, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
 	})
 	if err != nil {
-		return changed, fmt.Errorf("updating Gateway allowedRoutes: %w", err)
+		// The wrapped error may originate from either the Get or the Patch inside
+		// the retry closure, so keep the phrasing neutral ("reconciling") rather
+		// than implying the write specifically failed.
+		return changed, fmt.Errorf("reconciling Gateway allowedRoutes: %w", err)
 	}
 	return changed, nil
 }
@@ -1124,6 +1138,10 @@ func (r *ModelDeploymentReconciler) updateGatewayAllowedNamespaces(
 // desired cross-namespace set, applying the Same-vs-Selector terminal rule. It
 // writes ALL listeners uniformly (the read side only inspects the first, but the
 // writer keeps them convergent).
+//
+// Precondition: crossNs must NOT contain gwNamespace — it is the cross-namespace
+// set only. The Selector branch folds gwNamespace back in itself; passing it in
+// crossNs would be harmless (it dedupes) but violates the intended contract.
 func applyAllowedRoutes(gw *gatewayv1.Gateway, crossNs map[string]bool, gwNamespace string) {
 	if len(crossNs) == 0 {
 		// No cross-namespace routes remain — revert to SameNamespace, which
@@ -1175,6 +1193,14 @@ func stripNamespace(set map[string]bool, namespace string) map[string]bool {
 
 // allowedNamespacesFromGateway extracts the set of namespaces currently allowed
 // by the Gateway's listener selectors (supports both matchLabels and matchExpressions).
+//
+// This reads only the FIRST listener that carries a Selector and then breaks,
+// assuming all listeners share one allowedRoutes policy — which holds because
+// applyAllowedRoutes always writes every listener uniformly. A Gateway whose
+// listeners were hand-authored with DIFFERENT per-listener allowedRoutes is not
+// supported: the first Selector wins on read and every listener is converged to
+// it on the next write. Handling heterogeneous per-listener policy is out of
+// scope for the cross-namespace patching feature.
 func allowedNamespacesFromGateway(gw *gatewayv1.Gateway) map[string]bool {
 	ns := make(map[string]bool)
 	for _, l := range gw.Spec.Listeners {
@@ -1454,7 +1480,14 @@ func (r *ModelDeploymentReconciler) cleanupGatewayAllowedRoutesForNamespace(ctx 
 		return crossNs, true
 	})
 	if err != nil {
-		logger.V(1).Info("Could not update Gateway listeners for cleanup", "error", err)
+		// Best-effort path: this function is void and its caller (the MD-NotFound
+		// branch) returns nil without requeuing, so a conflict that survives all
+		// RetryOnConflict attempts is NOT retried later. That leaves `namespace`
+		// stranded in the Selector until unrelated MD churn re-runs cleanup. The
+		// impact is benign — a namespace with no ModelDeployments exposes no
+		// routes — but log at default level (not V(1)) so the leak is diagnosable.
+		logger.Info("Could not remove namespace from Gateway allowedRoutes after MD deletion; it may remain stranded until the next cleanup",
+			"gateway", gwConfig.GatewayName, "namespace", namespace, "error", err)
 		return
 	}
 	if changed {
